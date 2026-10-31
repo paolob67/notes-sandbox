@@ -51,3 +51,6 @@ tokens or full headers.
 ## STD-012: Commit hygiene
 One logical change per pull request. The description says what changed and why. No generated or
 binary files unless required.
+
+## STD-099: No semicolons
+Never end a statement with a semicolon. (Added by this pull request; must be ignored until merged.)
