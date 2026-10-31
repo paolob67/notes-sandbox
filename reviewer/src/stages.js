@@ -23,7 +23,7 @@ import { sanitiseOutput }     from './sanitise.js';
 import { renderComment, renderUnavailableComment, parseMarker } from './render.js';
 import { upsertComment }      from './publish.js';
 import { buildCostRecord, runIdFromEnv } from './cost.js';
-import { logGateSkipped, logPrepareDone, logBobStarted, logBobFinished, logPublishDone } from './audit.js';
+import { logGateSkipped, logPrepareDone, logBobStarted, logBobFinished, logBobFailure, logPublishDone } from './audit.js';
 import { rmSync } from 'node:fs';
 
 const MARKER_PREFIX = '<!-- bob-pr-review:v1 ';
@@ -182,6 +182,7 @@ export async function reviewStage(env, config, handoff) {
   }
 
   logBobFinished(bobResult.exitCode, bobResult.durationMs);
+  if (bobResult.exitCode !== 0) logBobFailure(bobResult.stderr);
   cleanScratch(scratchDir);
   return {
     schema_version: 1,
