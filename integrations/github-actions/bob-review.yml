@@ -1,4 +1,4 @@
-# Advisory pull request review by IBM Bob. See docs/adr/0012 and docs/adr/0013.
+# Advisory pull request review by IBM Bob. See docs/adr/0012 and docs/adr/0013 (license).
 #
 # Three jobs on three fresh GitHub-hosted runners, one credential each:
 #   prepare  read-only GITHUB_TOKEN: gates, diff, base-branch rules, redaction, prompt
@@ -49,10 +49,12 @@ env:
 jobs:
   prepare:
     name: prepare
-    # Kill switch (G10): the repository variable must be exactly "true". Review only after a green CI.
+    # Kill switch (G10): the repository variable must be exactly "true". Review only after a green CI
+    # that was itself a pull_request run (a CI run on a push has no PR number; found in Part B).
     if: >-
       vars.BOB_REVIEW_ENABLED == 'true' &&
-      (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
