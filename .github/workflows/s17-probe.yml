@@ -1,0 +1,87 @@
+name: S17 probe
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+permissions: {}
+jobs:
+  issues-write:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      issues: write
+    steps:
+      - name: Probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+        run: |
+          show() { grep -iE '^(HTTP/|x-accepted-github-permissions)' | tr '\r\n' '  '; echo; }
+          zero=0000000000000000000000000000000000000000
+          printf 'LIST comments   : '; gh api -i "repos/$R/issues/$PR/comments" 2>&1 | show
+          printf 'GET pull        : '; gh api -i "repos/$R/pulls/$PR" 2>&1 | show
+          printf 'POST review     : '; gh api -i -X POST "repos/$R/pulls/$PR/reviews" -f event=COMMENT -f commit_id=$zero 2>&1 | show
+          printf 'POST check-run  : '; gh api -i -X POST "repos/$R/check-runs" -f name=probe 2>&1 | show
+          printf 'POST status     : '; gh api -i -X POST "repos/$R/statuses/$zero" -f state=bogus 2>&1 | show
+  issues-write-pr-read:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+        run: |
+          show() { grep -iE '^(HTTP/|x-accepted-github-permissions)' | tr '\r\n' '  '; echo; }
+          zero=0000000000000000000000000000000000000000
+          printf 'LIST comments   : '; gh api -i "repos/$R/issues/$PR/comments" 2>&1 | show
+          printf 'GET pull        : '; gh api -i "repos/$R/pulls/$PR" 2>&1 | show
+          printf 'POST review     : '; gh api -i -X POST "repos/$R/pulls/$PR/reviews" -f event=COMMENT -f commit_id=$zero 2>&1 | show
+          printf 'POST check-run  : '; gh api -i -X POST "repos/$R/check-runs" -f name=probe 2>&1 | show
+          printf 'POST status     : '; gh api -i -X POST "repos/$R/statuses/$zero" -f state=bogus 2>&1 | show
+  issues-write-contents-read:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+        run: |
+          show() { grep -iE '^(HTTP/|x-accepted-github-permissions)' | tr '\r\n' '  '; echo; }
+          zero=0000000000000000000000000000000000000000
+          printf 'LIST comments   : '; gh api -i "repos/$R/issues/$PR/comments" 2>&1 | show
+          printf 'GET pull        : '; gh api -i "repos/$R/pulls/$PR" 2>&1 | show
+          printf 'POST review     : '; gh api -i -X POST "repos/$R/pulls/$PR/reviews" -f event=COMMENT -f commit_id=$zero 2>&1 | show
+          printf 'POST check-run  : '; gh api -i -X POST "repos/$R/check-runs" -f name=probe 2>&1 | show
+          printf 'POST status     : '; gh api -i -X POST "repos/$R/statuses/$zero" -f state=bogus 2>&1 | show
+  pr-write:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Probe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          R: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+        run: |
+          show() { grep -iE '^(HTTP/|x-accepted-github-permissions)' | tr '\r\n' '  '; echo; }
+          zero=0000000000000000000000000000000000000000
+          printf 'LIST comments   : '; gh api -i "repos/$R/issues/$PR/comments" 2>&1 | show
+          printf 'GET pull        : '; gh api -i "repos/$R/pulls/$PR" 2>&1 | show
+          printf 'POST review     : '; gh api -i -X POST "repos/$R/pulls/$PR/reviews" -f event=COMMENT -f commit_id=$zero 2>&1 | show
+          printf 'POST check-run  : '; gh api -i -X POST "repos/$R/check-runs" -f name=probe 2>&1 | show
+          printf 'POST status     : '; gh api -i -X POST "repos/$R/statuses/$zero" -f state=bogus 2>&1 | show
