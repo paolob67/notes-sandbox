@@ -64,6 +64,7 @@ jobs:
       actions: read
     outputs:
       proceed: ${{ steps.flag.outputs.proceed }}
+      handoff: ${{ steps.flag.outputs.handoff }}
     steps:
       - name: Check out the default branch (trusted code only)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -79,14 +80,16 @@ jobs:
         env:
           REVIEW_EXCHANGE_DIR: ${{ runner.temp }}/exchange
         run: |
-          node -e "const fs=require('fs'),p=require('path');let v='false';try{v=JSON.parse(fs.readFileSync(p.join(process.env.REVIEW_EXCHANGE_DIR,'handoff.json'),'utf8')).proceed===true?'true':'false'}catch{}console.log('proceed='+v)" >> "$GITHUB_OUTPUT"
+          node -e "const fs=require('fs'),p=require('path');let v='false',h='false';try{const j=JSON.parse(fs.readFileSync(p.join(process.env.REVIEW_EXCHANGE_DIR,'handoff.json'),'utf8'));h='true';v=j.proceed===true?'true':'false'}catch{}console.log('proceed='+v);console.log('handoff='+h)" >> "$GITHUB_OUTPUT"
+      # Rejected input (G24) ends prepare before a handoff exists: no artifact, nothing to publish,
+      # and the run stays green (found in Part B, run 41195024332).
       - name: Upload the prompt (data only)
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: prompt
           path: ${{ runner.temp }}/exchange/handoff.json
           retention-days: 1
-          if-no-files-found: error
+          if-no-files-found: ignore
       - name: Upload the trusted reviewer code
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -139,7 +142,7 @@ jobs:
     name: publish
     needs: [prepare, review]
     # Runs after review whatever its outcome, so a failed or timed-out review still gets a short note.
-    if: always() && needs.prepare.result == 'success'
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.handoff == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     # S17, ADR 0014: PR comments need pull-requests: write (issues: write alone is refused with 403).
