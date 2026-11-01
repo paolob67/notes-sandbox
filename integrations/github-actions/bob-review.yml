@@ -1,0 +1,230 @@
+# Advisory pull request review by IBM Bob. See docs/adr/0012, 0013 (license) and 0015 (trigger).
+#
+# Three jobs on three fresh GitHub-hosted runners, one credential each:
+#   prepare  read-only GITHUB_TOKEN: resolve the trigger (PR from the head SHA, required CI green),
+#            gates, diff, base-branch rules, redaction, prompt
+#   review   BOB_API_KEY only (environment bob-review): Bob in a hardened container, read-only
+#   publish  GITHUB_TOKEN with pull-requests: write (S17, ADR 0014): validates the result, upserts the
+#            one comment
+#
+# Triggers (G12):
+#   workflow_run          a required CI workflow finished; the review starts only when every required
+#                         workflow is green for that exact head SHA (G31)
+#   pull_request_target   a maintainer applied the label ai-review (re-request, or opt in an outside
+#                         contributor, ADR 0015); same CI check, same gates; no checkout of PR code
+#   workflow_dispatch     manual run by someone with write access (kept for operations and tests)
+#
+# This workflow never checks out pull request code. The only checkout is the default branch
+# (workflow_run always runs the default branch definition; pull_request_target checks out the base
+# branch when no ref is given), and it happens in the prepare job only; the other jobs receive the
+# trusted code as the "source" artifact so they need no repository token. Pull request data reaches
+# the jobs only as environment variables that the scripts validate (G24), never inside a run: string
+# or a workflow expression used by a shell.
+name: Bob review
+
+on:
+  workflow_run:
+    workflows: ["CI", "Lint"]
+    types: [completed]
+  pull_request_target:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      head_sha:
+        description: Head commit SHA of the pull request (40 hex characters)
+        required: true
+        type: string
+
+# G1: no permissions by default; every job grants its own.
+permissions: {}
+
+env:
+  REVIEW_REPO: ${{ github.repository }}
+  REVIEW_ENABLED: ${{ vars.BOB_REVIEW_ENABLED }}
+
+jobs:
+  prepare:
+    name: prepare
+    # Kill switch (G10): the repository variable must be exactly "true". Review only after a green CI
+    # that was itself a pull_request run (a CI run on a push has no PR number; found in Phase 4), or
+    # on the ai-review label, or on a manual dispatch. The CI check itself is in resolve-trigger.mjs.
+    if: >-
+      vars.BOB_REVIEW_ENABLED == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request_target' && github.event.label.name == 'ai-review') ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read # default branch checkout and the rules files
+      pull-requests: read # PR metadata, diff, commits/{sha}/pulls, existing comment
+      actions: read # list workflow runs for the head SHA (G31)
+    outputs:
+      ready: ${{ steps.trigger.outputs.ready }}
+      pr_number: ${{ steps.trigger.outputs.pr_number }}
+      head_sha: ${{ steps.trigger.outputs.head_sha }}
+      proceed: ${{ steps.flag.outputs.proceed }}
+      handoff: ${{ steps.flag.outputs.handoff }}
+    steps:
+      - name: Check out the default branch (trusted code only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Resolves the PR from the head SHA through the API and checks every required CI workflow
+      # (G24, G31). Not ready is a quiet stop, never a red run.
+      - name: Resolve the trigger
+        id: trigger
+        env:
+          SCM_READ_TOKEN: ${{ github.token }}
+          TRIGGER_EVENT: ${{ github.event_name }}
+          TRIGGER_HEAD_SHA: ${{ github.event.workflow_run.head_sha || inputs.head_sha }}
+          TRIGGER_PR_NUMBER: ${{ github.event.number || inputs.pr_number }}
+          TRIGGER_WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          REVIEW_REQUIRED_WORKFLOWS: ${{ vars.BOB_REVIEW_REQUIRED_WORKFLOWS }}
+        run: node integrations/github-actions/scripts/resolve-trigger.mjs
+      - name: Prepare
+        if: steps.trigger.outputs.ready == 'true'
+        env:
+          SCM_READ_TOKEN: ${{ github.token }}
+          REVIEW_PR_NUMBER: ${{ steps.trigger.outputs.pr_number }}
+          REVIEW_HEAD_SHA: ${{ steps.trigger.outputs.head_sha }}
+          REVIEW_EXCHANGE_DIR: ${{ runner.temp }}/exchange
+        run: node reviewer/bin/reviewer.js prepare
+      - name: Read the proceed flag
+        id: flag
+        env:
+          REVIEW_EXCHANGE_DIR: ${{ runner.temp }}/exchange
+        run: |
+          node -e "const fs=require('fs'),p=require('path');let v='false',h='false';try{const j=JSON.parse(fs.readFileSync(p.join(process.env.REVIEW_EXCHANGE_DIR,'handoff.json'),'utf8'));h='true';v=j.proceed===true?'true':'false'}catch{}console.log('proceed='+v);console.log('handoff='+h)" >> "$GITHUB_OUTPUT"
+      # Rejected input (G24) or a trigger that is not ready ends prepare before a handoff exists: no
+      # artifact, nothing to publish, and the run stays green (found in Phase 4, run 41195024332).
+      - name: Upload the prompt (data only)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: prompt
+          path: ${{ runner.temp }}/exchange/handoff.json
+          retention-days: 1
+          if-no-files-found: ignore
+      - name: Upload the trusted reviewer code
+        if: steps.flag.outputs.handoff == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: source
+          path: |
+            reviewer
+            integrations
+            tests/container
+          retention-days: 1
+
+  review:
+    name: review
+    needs: prepare
+    if: needs.prepare.outputs.proceed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    # G11: one Bob call per pull request at a time; a newer review for the same PR cancels an older one.
+    # The group is on this job, not on the workflow, so a run that stops quietly in prepare (stale SHA,
+    # CI still pending) can never cancel a real review (ADR 0015). The PR number comes from the API.
+    concurrency:
+      group: bob-review-run-${{ needs.prepare.outputs.pr_number }}
+      cancel-in-progress: true
+    # The job token has no scopes: this machine holds the Bob key and nothing that can write to GitHub.
+    permissions: {}
+    environment: bob-review
+    env:
+      REVIEW_PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+      REVIEW_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+      REVIEW_BOB_TIMEOUT_SECONDS: ${{ vars.BOB_REVIEW_BOB_TIMEOUT_SECONDS }}
+    steps:
+      - name: Download the trusted reviewer code
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: src
+      - name: Download the prompt
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prompt
+          path: ${{ runner.temp }}/exchange
+      - name: Build the reviewer image (no secret in this step)
+        run: bash src/integrations/container/build.sh pr-reviewer:run
+        env:
+          CONTAINER_TOOL: docker
+      - name: Run Bob in the hardened container
+        env:
+          BOB_API_KEY: ${{ secrets.BOB_API_KEY }}
+          REVIEW_EXCHANGE_DIR: ${{ runner.temp }}/exchange
+        run: bash src/integrations/github-actions/run-review.sh pr-reviewer:run
+      - name: Upload the result (untrusted)
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: result
+          path: ${{ runner.temp }}/exchange/result.json
+          retention-days: 1
+          if-no-files-found: ignore
+
+  publish:
+    name: publish
+    needs: [prepare, review]
+    # Runs after review whatever its outcome, so a failed or timed-out review still gets a short note.
+    # A review cancelled by a newer one posts nothing; the newer run publishes.
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.handoff == 'true' && needs.review.result != 'cancelled'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    # Publishes are serialised per pull request so an older one cannot overwrite a newer comment.
+    concurrency:
+      group: bob-review-publish-${{ needs.prepare.outputs.pr_number }}
+      cancel-in-progress: false
+    env:
+      REVIEW_PR_NUMBER: ${{ needs.prepare.outputs.pr_number }}
+      REVIEW_HEAD_SHA: ${{ needs.prepare.outputs.head_sha }}
+    # S17, ADR 0014: PR comments need pull-requests: write (issues: write alone is refused with 403).
+    # That scope can also reach the reviews endpoint, so "never approves" (G34) is held by the client
+    # endpoint allowlist, this workflow check and the repository setting that stops Actions approving.
+    permissions:
+      pull-requests: write # create and update the one comment (S17, ADR 0014)
+    steps:
+      - name: Download the trusted reviewer code
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: source
+          path: src
+      - name: Download the prompt
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: prompt
+          path: ${{ runner.temp }}/exchange
+      - name: Download the result (untrusted, may be absent)
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: result
+          path: ${{ runner.temp }}/exchange
+      - name: Publish
+        env:
+          SCM_COMMENT_TOKEN: ${{ github.token }}
+          REVIEW_EXCHANGE_DIR: ${{ runner.temp }}/exchange
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: node src/reviewer/bin/reviewer.js publish
+      - name: Job summary (audit record)
+        if: always()
+        env:
+          REVIEW_EXCHANGE_DIR: ${{ runner.temp }}/exchange
+        run: |
+          if [ -f "$REVIEW_EXCHANGE_DIR/audit.json" ]; then
+            { echo '### Bob review audit record'; echo '```json'; cat "$REVIEW_EXCHANGE_DIR/audit.json"; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload the audit record
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: audit
+          path: ${{ runner.temp }}/exchange/audit.json
+          retention-days: 14
+          if-no-files-found: ignore
